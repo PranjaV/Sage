@@ -1,0 +1,14 @@
+.env
+.env.*
+!.env.example
+out/
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.mp3
+*.wav
+*.png
+.DS_Store
+.claude/

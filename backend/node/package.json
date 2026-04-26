@@ -1,0 +1,24 @@
+{
+  "name": "sage-node",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch src/bridge.js",
+    "start": "node src/bridge.js",
+    "test:tts": "node scripts/test-tts.js",
+    "test:stt": "node scripts/test-stt.js",
+    "test:stagehand": "node scripts/test-stagehand.js",
+    "emit-test": "node scripts/emit-test-event.js"
+  },
+  "dependencies": {
+    "@browserbasehq/stagehand": "^2.0.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.0",
+    "openai": "^4.77.0",
+    "playwright": "^1.49.0",
+    "socket.io": "^4.8.0",
+    "socket.io-client": "^4.8.0",
+    "zod": "^3.23.8"
+  }
+}
