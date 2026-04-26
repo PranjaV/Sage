@@ -14,7 +14,7 @@ export const usage = {
  * Stream TTS audio for `text`. Calls onChunk(buf) per network chunk, onDone({ ms, bytes, engine }) on completion.
  * Falls back to OpenAI gpt-4o-mini-tts if ElevenLabs errors. Caller is expected to keep `text` ≤100 words.
  */
-export async function speak({ text, sessionId, onChunk, onDone }) {
+export async function speak({ text, sessionId, onChunk, onDone, onFallback }) {
   const trimmed = (text || '').trim();
   if (!trimmed) {
     onDone?.({ ms: 0, bytes: 0, chunks: 0, engine: 'noop' });
@@ -35,6 +35,7 @@ export async function speak({ text, sessionId, onChunk, onDone }) {
   } catch (err) {
     console.warn(`[tts] elevenlabs failed (${err.message}) — engaging openai fallback`);
     usage.fallbacksEngaged += 1;
+    onFallback?.(err.message);
   }
 
   try {

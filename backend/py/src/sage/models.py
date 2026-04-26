@@ -40,3 +40,14 @@ class SessionEndResponse(BaseModel):
     duration_seconds: int
     interactions_written: int
     cognitive_analysis: dict[str, Any] = Field(default_factory=dict)
+
+
+class CaregiverAskRequest(BaseModel):
+    question: str
+
+
+class CaregiverAskResponse(BaseModel):
+    question: str
+    sql: str = ""
+    rows: list[dict[str, Any]] = Field(default_factory=list)
+    answer_text: str = ""

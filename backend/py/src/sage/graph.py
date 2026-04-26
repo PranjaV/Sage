@@ -18,6 +18,8 @@ import httpx
 from langgraph.graph import END, START, StateGraph
 from openai import OpenAI
 
+from sage import usage as usage_log
+
 log = logging.getLogger("sage.graph")
 
 ROUTING_MODEL = "gpt-4.1-mini"
@@ -97,6 +99,7 @@ def supervisor_node(state: SageState) -> SageState:
         ],
         temperature=0.0,
     )
+    usage_log.record_from_openai_response(ROUTING_MODEL, resp, session_id=state.get("session_id"))
     raw = resp.choices[0].message.content or "{}"
     try:
         data = json.loads(raw)
@@ -166,6 +169,7 @@ def memory_lookup_node(state: SageState) -> SageState:
         ],
         temperature=0.0,
     )
+    usage_log.record_from_openai_response(ROUTING_MODEL, resp, session_id=state.get("session_id"))
     raw = resp.choices[0].message.content or "{}"
     try:
         data = json.loads(raw)
@@ -213,22 +217,32 @@ Hard rules:
 """
 
 
+BROWSER_GRACEFUL_FALLBACK = (
+    "I had trouble finding that on Amazon just now. "
+    "I can save it to your list and try again later. Is that okay?"
+)
+
+
 def responder_node(state: SageState) -> SageState:
     user_text = state.get("user_text", "")
     intent = state.get("intent", "smalltalk")
     browser_result = state.get("browser_result") or {}
     memory_summary = state.get("memory_summary") or ""
 
+    # Graceful canned line when the browser agent fails — guarantees the exact
+    # wording (no model wandering into apologies that scare the patient) and
+    # saves a model call.
+    if intent == "browser_task" and browser_result and not browser_result.get("ok"):
+        _push_trace(state, "responder", "browser failed → graceful fallback")
+        return {"response_text": BROWSER_GRACEFUL_FALLBACK}
+
     context_parts = [f"User said: {user_text}", f"Intent: {intent}"]
     if memory_summary:
         context_parts.append(f"Memory: {memory_summary}")
-    if browser_result:
-        if browser_result.get("ok"):
-            context_parts.append(
-                f"Browser result: title='{browser_result.get('title')}', price='{browser_result.get('price')}'"
-            )
-        else:
-            context_parts.append(f"Browser failed: {browser_result.get('reason')}")
+    if browser_result and browser_result.get("ok"):
+        context_parts.append(
+            f"Browser result: title='{browser_result.get('title')}', price='{browser_result.get('price')}'"
+        )
 
     client = get_openai()
     resp = client.chat.completions.create(
@@ -240,6 +254,7 @@ def responder_node(state: SageState) -> SageState:
         temperature=0.6,
         max_tokens=180,
     )
+    usage_log.record_from_openai_response(RESPONDER_MODEL, resp, session_id=state.get("session_id"))
     text = (resp.choices[0].message.content or "").strip()
     _push_trace(state, "responder", "reply ready")
     return {"response_text": text}

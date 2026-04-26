@@ -1,0 +1,196 @@
+# Cortex Analyst semantic model for Sage caregiver questions.
+#
+# Upload to a stage and reference from the Cortex Analyst REST endpoint:
+#   PUT file://backend/py/scripts/cortex_semantic.yaml @SAGE_STAGE/cortex/
+#   semantic_model_file: '@SAGE_DB.CORE.SAGE_STAGE/cortex/cortex_semantic.yaml'
+#
+# Spec: https://docs.snowflake.com/en/user-guide/snowflake-cortex/cortex-analyst/semantic-model-spec
+name: sage_caregiver
+description: >
+  Caregiver-facing analytics over Sage voice sessions. Lets caregivers ask
+  natural-language questions about a patient's recent cognitive scores,
+  session counts, severity trends, and how today's session compares to
+  recent ones.
+
+tables:
+  - name: cognitive_analyses
+    description: One row per analyzed Sage session — the score, severity, and metrics.
+    base_table:
+      database: SAGE_DB
+      schema: CORE
+      table: COGNITIVE_ANALYSES
+    primary_key:
+      columns: [analysis_id]
+    dimensions:
+      - name: patient_id
+        expr: patient_id
+        data_type: TEXT
+        description: Patient identifier (e.g. 'p_eleanor').
+        unique: false
+        sample_values:
+          - p_eleanor
+      - name: severity
+        expr: severity
+        data_type: TEXT
+        description: Cognitive severity band derived from overall_score.
+        sample_values:
+          - ok
+          - watch
+          - attention
+          - follow-up
+      - name: session_id
+        expr: session_id
+        data_type: TEXT
+        unique: true
+    time_dimensions:
+      - name: analyzed_at
+        expr: analyzed_at
+        data_type: TIMESTAMP_NTZ
+        description: When the cognitive analysis ran.
+    measures:
+      - name: overall_score
+        expr: overall_score
+        data_type: NUMBER
+        description: 0–100 cognitive score for the session.
+        default_aggregation: avg
+      - name: baseline_delta
+        expr: baseline_delta
+        data_type: NUMBER
+        description: Score minus the patient's baseline.
+        default_aggregation: avg
+      - name: session_count
+        expr: 1
+        data_type: NUMBER
+        description: Count of analyzed sessions.
+        default_aggregation: sum
+      - name: attention_or_worse_count
+        expr: CASE WHEN severity IN ('attention','follow-up') THEN 1 ELSE 0 END
+        data_type: NUMBER
+        description: Count of sessions with severity 'attention' or 'follow-up'.
+        default_aggregation: sum
+
+  - name: sessions
+    description: One row per voice session — duration and primary task.
+    base_table:
+      database: SAGE_DB
+      schema: CORE
+      table: SESSIONS
+    primary_key:
+      columns: [session_id]
+    dimensions:
+      - name: patient_id
+        expr: patient_id
+        data_type: TEXT
+        sample_values:
+          - p_eleanor
+      - name: primary_task
+        expr: primary_task
+        data_type: TEXT
+        description: The main thing the patient did this session (e.g. 'browser: weekly pill organizer').
+      - name: session_id
+        expr: session_id
+        data_type: TEXT
+        unique: true
+    time_dimensions:
+      - name: started_at
+        expr: started_at
+        data_type: TIMESTAMP_NTZ
+    measures:
+      - name: duration_seconds
+        expr: duration_seconds
+        data_type: NUMBER
+        default_aggregation: avg
+      - name: total_duration_seconds
+        expr: duration_seconds
+        data_type: NUMBER
+        default_aggregation: sum
+
+  - name: patients
+    description: One row per enrolled patient.
+    base_table:
+      database: SAGE_DB
+      schema: CORE
+      table: PATIENTS
+    primary_key:
+      columns: [patient_id]
+    dimensions:
+      - name: patient_id
+        expr: patient_id
+        data_type: TEXT
+        sample_values:
+          - p_eleanor
+      - name: name
+        expr: name
+        data_type: TEXT
+      - name: caregiver_name
+        expr: caregiver_name
+        data_type: TEXT
+    measures:
+      - name: baseline_score
+        expr: baseline_score
+        data_type: NUMBER
+        default_aggregation: avg
+
+relationships:
+  - name: analyses_to_sessions
+    left_table: cognitive_analyses
+    right_table: sessions
+    relationship_columns:
+      - left_column: session_id
+        right_column: session_id
+    join_type: left_outer
+    relationship_type: many_to_one
+  - name: analyses_to_patients
+    left_table: cognitive_analyses
+    right_table: patients
+    relationship_columns:
+      - left_column: patient_id
+        right_column: patient_id
+    join_type: left_outer
+    relationship_type: many_to_one
+
+verified_queries:
+  - name: avg_score_this_week_vs_last_week
+    question: What was Eleanor's average score this week compared to last week?
+    sql: |
+      SELECT
+        CASE
+          WHEN analyzed_at >= DATEADD(day, -7, CURRENT_TIMESTAMP()) THEN 'this_week'
+          WHEN analyzed_at >= DATEADD(day, -14, CURRENT_TIMESTAMP()) THEN 'last_week'
+        END AS bucket,
+        AVG(overall_score) AS avg_score,
+        COUNT(*) AS n_sessions
+      FROM SAGE_DB.CORE.COGNITIVE_ANALYSES
+      WHERE patient_id = 'p_eleanor'
+        AND analyzed_at >= DATEADD(day, -14, CURRENT_TIMESTAMP())
+      GROUP BY 1
+      ORDER BY 1
+  - name: attention_or_worse_last_30_days
+    question: How many sessions in the last 30 days had severity 'attention' or worse?
+    sql: |
+      SELECT COUNT(*) AS attention_or_worse_sessions
+      FROM SAGE_DB.CORE.COGNITIVE_ANALYSES
+      WHERE patient_id = 'p_eleanor'
+        AND severity IN ('attention', 'follow-up')
+        AND analyzed_at >= DATEADD(day, -30, CURRENT_TIMESTAMP())
+  - name: today_vs_last_three
+    question: What changed in today's session compared to the last three?
+    sql: |
+      WITH today_session AS (
+        SELECT overall_score, severity, baseline_delta, analyzed_at
+        FROM SAGE_DB.CORE.COGNITIVE_ANALYSES
+        WHERE patient_id = 'p_eleanor'
+        ORDER BY analyzed_at DESC
+        LIMIT 1
+      ),
+      prior_three AS (
+        SELECT overall_score, severity, analyzed_at
+        FROM SAGE_DB.CORE.COGNITIVE_ANALYSES
+        WHERE patient_id = 'p_eleanor'
+        ORDER BY analyzed_at DESC
+        LIMIT 4
+      )
+      SELECT
+        (SELECT overall_score FROM today_session) AS today_score,
+        (SELECT severity FROM today_session) AS today_severity,
+        (SELECT AVG(overall_score) FROM prior_three OFFSET 1) AS prior_three_avg

@@ -18,7 +18,7 @@ import express from 'express';
 import { Server as SocketIOServer } from 'socket.io';
 
 import { StreamingSTT } from './stt.js';
-import { speak } from './tts.js';
+import { speak, usage as ttsUsage } from './tts.js';
 import { runBrowserTask, prewarm as prewarmStagehand } from './stagehand-runner.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -218,6 +218,7 @@ async function handleUtterance(sessionId, text) {
     text: responseText,
     sessionId,
     onChunk: (buf) => emitToSession(sessionId, 'tts:chunk', { b64: buf.toString('base64') }),
+    onFallback: (reason) => emitToSession(sessionId, 'tts:fallback-engaged', { reason }),
     onDone: ({ ms, bytes, engine }) => {
       emitToSession(sessionId, 'tts:done', { ms, bytes, engine });
       emitToSession(sessionId, 'orb:state', { state: 'complete' });
@@ -231,6 +232,36 @@ app.post('/internal/trace', (req, res) => {
   const { session_id, node, text } = req.body || {};
   if (!session_id || !node) return res.status(400).json({ ok: false, error: 'session_id+node required' });
   emitToSession(session_id, 'agent:trace', { node, text: text ?? '' });
+  res.json({ ok: true });
+});
+
+app.post('/internal/analysis-ready', (req, res) => {
+  const { session_id, score, severity } = req.body || {};
+  if (!session_id) return res.status(400).json({ ok: false, error: 'session_id required' });
+  console.log(`[cognitive] analysis ready session=${session_id} score=${score} severity=${severity}`);
+  // Broadcast — caregiver dashboard listens on a separate socket and reloads.
+  io.emit('cognitive:ready', { session_id, score, severity });
+  res.json({ ok: true });
+});
+
+app.post('/internal/session-cost', (req, res) => {
+  const { session_id, in: inTok = 0, out: outTok = 0, dollars = 0 } = req.body || {};
+  if (!session_id) return res.status(400).json({ ok: false, error: 'session_id required' });
+  // Roll in TTS usage (the bridge owns ElevenLabs/OpenAI TTS).
+  const ttsChars = ttsUsage.ttsChars;
+  const ttsDollars = ttsUsage.ttsDollars;
+  const total = Number(dollars) + ttsDollars;
+  console.log(
+    `Session ${session_id} cost: $${total.toFixed(4)} ` +
+      `(LLM $${Number(dollars).toFixed(4)} in=${inTok} out=${outTok} | ` +
+      `TTS $${ttsDollars.toFixed(4)} chars=${ttsChars})`,
+  );
+  io.emit('session:cost', {
+    session_id,
+    llm: { in: inTok, out: outTok, dollars: Number(dollars) },
+    tts: { chars: ttsChars, dollars: ttsDollars },
+    total_dollars: total,
+  });
   res.json({ ok: true });
 });
 

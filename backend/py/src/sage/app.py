@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 # backend/py/src/sage/app.py → parents[4] is the repo root.
@@ -17,11 +17,14 @@ load_dotenv(REPO_ROOT / ".env")
 from sage import snowflake_io  # noqa: E402
 from sage.graph import run_turn  # noqa: E402
 from sage.models import (  # noqa: E402
+    CaregiverAskRequest,
+    CaregiverAskResponse,
     SessionEndRequest,
     SessionEndResponse,
     TurnRequest,
     TurnResponse,
 )
+from sage.nodes.cognitive import analyze_session  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
 log = logging.getLogger("sage.app")
@@ -91,11 +94,101 @@ async def session_end(req: SessionEndRequest) -> SessionEndResponse:
         log.exception("session:end persistence failed: %s", err)
         raise HTTPException(status_code=500, detail=f"snowflake write failed: {err}") from err
 
-    log.info("[cognitive] analysis queued for %s (B16 will fill this in)", req.session_id)
+    # Run cognitive analysis synchronously — it's fast (≤ a few seconds) and the
+    # caregiver dashboard wants the row before it polls.
+    try:
+        analysis = analyze_session(
+            session_id=req.session_id,
+            patient_id=req.patient_id,
+            interactions=[i.model_dump() for i in req.interactions],
+            transcript_text=transcript_text,
+            started_at=req.started_at,
+            ended_at=req.ended_at,
+        )
+    except Exception as err:  # never crash the bridge over a summary failure
+        log.exception("cognitive analysis failed: %s", err)
+        analysis = {"status": "failed", "error": str(err)}
+
     return SessionEndResponse(
         session_id=req.session_id,
         persisted=True,
         duration_seconds=duration,
         interactions_written=written,
-        cognitive_analysis={"status": "queued"},
+        cognitive_analysis=analysis,
     )
+
+
+@app.post("/caregiver/ask", response_model=CaregiverAskResponse)
+async def caregiver_ask(req: CaregiverAskRequest) -> CaregiverAskResponse:
+    """Cortex Analyst answers a natural-language question about a patient.
+
+    Returns the generated SQL, executed rows, and a one-sentence summary."""
+    if not req.question.strip():
+        raise HTTPException(status_code=400, detail="question is required")
+
+    from sage import cortex_analyst  # local import keeps cold-start small
+
+    try:
+        result = cortex_analyst.ask(req.question)
+    except Exception as err:
+        log.exception("cortex_analyst.ask failed: %s", err)
+        raise HTTPException(status_code=502, detail=f"cortex analyst error: {err}") from err
+
+    return CaregiverAskResponse(
+        question=result["question"],
+        sql=result.get("sql") or "",
+        rows=result.get("rows") or [],
+        answer_text=result.get("answer_text") or "",
+    )
+
+
+# ─── caregiver dashboard reads ────────────────────────────────────────────────
+
+
+@app.get("/caregiver/overview")
+async def caregiver_overview(patient_id: str = Query(..., min_length=1)) -> dict:
+    """Top-of-dashboard summary: patient identity + latest score + latest session."""
+    patient = snowflake_io.get_patient(patient_id)
+    if not patient:
+        raise HTTPException(status_code=404, detail=f"patient not found: {patient_id}")
+    latest_analysis = snowflake_io.get_latest_analysis(patient_id)
+    recent_sessions = snowflake_io.list_sessions_with_scores(patient_id, limit=1)
+    latest_session = recent_sessions[0] if recent_sessions else None
+    return {
+        "patient": patient,
+        "latest_session": latest_session,
+        "latest_score": latest_analysis["overall_score"] if latest_analysis else None,
+        "severity": latest_analysis["severity"] if latest_analysis else None,
+        "baseline_delta": latest_analysis["baseline_delta"] if latest_analysis else None,
+        "summary": latest_analysis["summary"] if latest_analysis else None,
+        "analyzed_at": latest_analysis["analyzed_at"] if latest_analysis else None,
+    }
+
+
+@app.get("/caregiver/trend")
+async def caregiver_trend(
+    patient_id: str = Query(..., min_length=1),
+    days: int = Query(30, ge=1, le=365),
+) -> dict:
+    """Daily score points (oldest → newest) for the trend chart."""
+    points = snowflake_io.get_trend(patient_id, days=days)
+    return {"patient_id": patient_id, "days": days, "points": points}
+
+
+@app.get("/caregiver/sessions")
+async def caregiver_sessions(
+    patient_id: str = Query(..., min_length=1),
+    limit: int = Query(10, ge=1, le=100),
+) -> dict:
+    """Recent sessions with score + severity for the dashboard list."""
+    sessions = snowflake_io.list_sessions_with_scores(patient_id, limit=limit)
+    return {"patient_id": patient_id, "sessions": sessions}
+
+
+@app.get("/caregiver/transcript")
+async def caregiver_transcript(session_id: str = Query(..., min_length=1)) -> dict:
+    """Full transcript + flagged phrases for a single session."""
+    detail = snowflake_io.get_session_transcript(session_id)
+    if not detail:
+        raise HTTPException(status_code=404, detail=f"session not found: {session_id}")
+    return detail
