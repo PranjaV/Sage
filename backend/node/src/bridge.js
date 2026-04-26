@@ -63,7 +63,7 @@ io.on('connection', (socket) => {
   socket.on('session:start', (payload = {}) => {
     const patientId = payload.patient_id || 'p_eleanor';
     const sessionId = payload.session_id || `${patientId}:${randomUUID()}`;
-    const session = createSession(sessionId, socket);
+    createSession(sessionId, socket, patientId);
     socket.data.sessionId = sessionId;
     socket.emit('session:started', { session_id: sessionId, patient_id: patientId });
     console.log(`[bridge] session:start ${sessionId}`);
@@ -75,13 +75,40 @@ io.on('connection', (socket) => {
     const session = sessions.get(sessionId);
     if (!session) return;
     session.sttSession?.end();
+    // Give any in-flight final transcript a beat to land before persisting.
+    await new Promise((r) => setTimeout(r, 250));
+
+    const startedAtIso = new Date(session.startedAt).toISOString();
+    const endedAtIso = new Date().toISOString();
+    let persisted = null;
+    try {
+      const r = await fetch(`${PY_BASE}/session/end`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session_id: sessionId,
+          patient_id: session.patientId,
+          started_at: startedAtIso,
+          ended_at: endedAtIso,
+          interactions: session.interactions,
+          primary_task: session.primaryTask,
+        }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      persisted = await r.json();
+    } catch (err) {
+      console.error(`[bridge] session:end persistence failed: ${err.message}`);
+    }
+
     socket.emit('session:ended', {
       session_id: sessionId,
       interactions: session.interactions.length,
       duration_seconds: Math.round((Date.now() - session.startedAt) / 1000),
+      persisted: !!persisted,
+      cognitive_analysis: persisted?.cognitive_analysis ?? { status: 'unavailable' },
     });
-    console.log(`[bridge] session:end ${sessionId} (${session.interactions.length} interactions) — analysis queued`);
-    // B14 / B16 will move write_session + analysis here.
+    console.log(`[bridge] session:end ${sessionId} (${session.interactions.length} interactions) persisted=${!!persisted}`);
     sessions.delete(sessionId);
   });
 
@@ -115,13 +142,15 @@ io.on('connection', (socket) => {
   });
 });
 
-function createSession(sessionId, socket) {
+function createSession(sessionId, socket, patientId) {
   const stt = new StreamingSTT({ sessionId });
   const session = {
     socket,
+    patientId: patientId || sessionId.split(':', 1)[0],
     sttSession: stt,
     interactions: [],
     startedAt: Date.now(),
+    primaryTask: null,
   };
   sessions.set(sessionId, session);
 
@@ -149,6 +178,8 @@ async function handleUtterance(sessionId, text) {
 
   let responseText;
   let trace = [];
+  let intent = null;
+  let payloadGoal = null;
   try {
     const r = await fetch(`${PY_BASE}/turn`, {
       method: 'POST',
@@ -160,6 +191,8 @@ async function handleUtterance(sessionId, text) {
     const data = await r.json();
     responseText = data.response_text;
     trace = data.trace ?? [];
+    intent = data.intent ?? null;
+    payloadGoal = data.payload_goal ?? null;
   } catch (err) {
     console.warn(`[bridge] /turn unavailable (${err.message}) — using echo fallback`);
     responseText = `I heard you say ${text}`;
@@ -172,6 +205,12 @@ async function handleUtterance(sessionId, text) {
   const session = sessions.get(sessionId);
   if (session) {
     session.interactions.push({ speaker: 'sage', utterance: responseText, ts: new Date().toISOString() });
+    // First substantive intent wins for primary_task — browser tasks have priority.
+    if (intent === 'browser_task' && payloadGoal) {
+      session.primaryTask = `browser: ${payloadGoal}`;
+    } else if (!session.primaryTask && intent && intent !== 'smalltalk') {
+      session.primaryTask = intent;
+    }
   }
 
   emitToSession(sessionId, 'orb:state', { state: 'speaking' });

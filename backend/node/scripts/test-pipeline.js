@@ -35,7 +35,7 @@ async function decodeToPcm() {
   });
 }
 
-const seen = { transcriptPartial: 0, transcriptFinal: null, traces: [], orbStates: [], ttsChunks: 0, ttsDone: null };
+const seen = { transcriptPartial: 0, transcriptFinal: null, traces: [], orbStates: [], ttsChunks: 0, ttsDone: null, sessionEnded: null };
 
 async function main() {
   console.log('… decoding sample mp3 → pcm16 mono 16kHz');
@@ -58,6 +58,7 @@ async function main() {
   sock.on('orb:state', (p) => { seen.orbStates.push(p.state); console.log('  → orb', p.state); });
   sock.on('tts:chunk', () => { seen.ttsChunks += 1; });
   sock.on('tts:done', (p) => { seen.ttsDone = p; console.log('  → tts:done', p); });
+  sock.on('session:ended', (p) => { seen.sessionEnded = p; console.log('  → session:ended', p); });
 
   sock.emit('session:start', { patient_id: 'p_eleanor' });
   await new Promise((res) => setTimeout(res, 250));
@@ -83,7 +84,12 @@ async function main() {
   }
 
   sock.emit('session:end');
-  await new Promise((res) => setTimeout(res, 250));
+  // Persistence does two Snowflake writes; wait up to 30s for confirmation.
+  const endDeadline = Date.now() + 30_000;
+  while (Date.now() < endDeadline && !seen.sessionEnded) {
+    await new Promise((res) => setTimeout(res, 250));
+  }
+  await new Promise((res) => setTimeout(res, 100));
   sock.close();
 
   // ─── assertions ───
@@ -98,6 +104,8 @@ async function main() {
   if (seen.ttsChunks < 1) failures.push('no tts chunks');
   const supervisorTrace = seen.traces.find((t) => t.node === 'supervisor');
   if (!supervisorTrace) failures.push('no supervisor trace');
+  if (!seen.sessionEnded) failures.push('no session:ended confirmation');
+  else if (!seen.sessionEnded.persisted) failures.push('session:ended reports persisted=false');
 
   if (failures.length) {
     console.error('✗ pipeline failures:');
@@ -105,7 +113,7 @@ async function main() {
     process.exit(1);
   }
 
-  console.log(`✓ pipeline ok | transcript="${seen.transcriptFinal.text}" | orb=${seen.orbStates.join('→')} | tts=${seen.ttsChunks} chunks (${seen.ttsDone.engine})`);
+  console.log(`✓ pipeline ok | transcript="${seen.transcriptFinal.text}" | orb=${seen.orbStates.join('→')} | tts=${seen.ttsChunks} chunks (${seen.ttsDone.engine}) | persisted=${seen.sessionEnded.persisted}`);
   process.exit(0);
 }
 

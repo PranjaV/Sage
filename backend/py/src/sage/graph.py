@@ -303,5 +303,6 @@ def run_turn(session_id: str, text: str) -> dict:
         "response_text": final_state.get("response_text", ""),
         "trace": final_state.get("trace", []),
         "intent": final_state.get("intent"),
+        "payload_goal": final_state.get("payload_goal"),
         "browser_result": final_state.get("browser_result"),
     }
