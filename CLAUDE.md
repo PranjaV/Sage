@@ -110,6 +110,25 @@ If a decision improves demo reliability, dignity, and clarity, prefer it over ex
 ## Known caveats from Phase 0
 
 - OpenAI org is on a 30k TPM limit for gpt-4.1; Stagehand's full-DOM extract exceeds this. Verification uses gpt-4.1-mini. Before B11 ships in production, either raise the org tier or scope the DOM passed to `extract`.
+- Browserbase Free tier caps at 3 concurrent sessions. If a test crashes, the session lingers — wait ~1 min or reset. Phase 2 verification used `STAGEHAND_ENV=LOCAL` (Playwright Chromium) for stability; switch back to Browserbase for the demo once concurrent sessions clear.
+- `node --watch` triggers spurious restarts during Stagehand init on Windows. Use `node src/bridge.js` (or `npm start`) for any run that needs the browser agent. `npm run dev` (with --watch) is fine for pure socket/REST work.
+
+## Running the backend (Phase 2)
+
+Two processes — both must be up for the full voice loop:
+
+```bash
+# Python orchestrator (LangGraph + Snowflake + memory)
+python -m uvicorn sage.app:app --app-dir backend/py/src --port 7777
+
+# Node bridge (Socket.IO + ElevenLabs + Stagehand)
+STAGEHAND_ENV=LOCAL node backend/node/src/bridge.js
+```
+
+Smoke the full mic→STT→graph→Stagehand→TTS pipeline:
+```bash
+node backend/node/scripts/test-pipeline.js
+```
 
 ## Build log
 
@@ -121,4 +140,5 @@ After every completed task in PLAN_A or PLAN_B, append a single line here with t
 - 2026-04-25 18:05 | A | B5 canonical layout scaffolded — backend/node/{src,scripts}, backend/py/{src/sage/{nodes,…},scripts}, pyproject.toml, .env/.env.example/.gitignore.
 - 2026-04-25 18:10 | A | B6 bridge online :3001 — Socket.IO + GET /health + heartbeat 1s + audio:chunk logging + graceful SIGINT/SIGTERM.
 - 2026-04-25 18:15 | A | B7 emit-test-event wired — bridge re-broadcasts client events (socket.broadcast.emit), /static serves out/test-tts.mp3 (200, 41422 bytes), full 10-event sequence flowed through end-to-end. Ready for CHECKPOINT 1.
+- 2026-04-25 22:35 | A | Phase 2 lands — B8 StreamingSTT (RMS gate, 8s cap, partial+final emits), B9 ElevenLabs streaming + OpenAI gpt-4o-mini-tts fallback, B10 LangGraph supervisor + FastAPI /turn (gpt-4.1-mini routing + responder), B11 Stagehand singleton (prewarmed at boot) + Python browser_agent via httpx, B12 Snowflake schema migrated + Eleanor seeded, B13 memory_lookup pulls profile from Snowflake. Pipeline smoke (mic→STT→graph→Stagehand→TTS) green: transcript matches, orb cycles thinking→speaking→complete, ElevenLabs streams the Sage clone in ~500ms.
 
